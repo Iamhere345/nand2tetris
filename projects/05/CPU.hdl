@@ -1,0 +1,171 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/05/CPU.hdl
+
+/**
+ * The Hack CPU (Central Processing unit), consisting of an ALU,
+ * two registers named A and D, and a program counter named PC.
+ * The CPU is designed to fetch and execute instructions written in 
+ * the Hack machine language. In particular, functions as follows:
+ * Executes the inputted instruction according to the Hack machine 
+ * language specification. The D and A in the language specification
+ * refer to CPU-resident registers, while M refers to the external
+ * memory location addressed by A, i.e. to Memory[A]. The inM input 
+ * holds the value of this location. If the current instruction needs 
+ * to write a value to M, the value is placed in outM, the address 
+ * of the target location is placed in the addressM output, and the 
+ * writeM control bit is asserted. (When writeM==0, any value may 
+ * appear in outM). The outM and writeM outputs are combinational: 
+ * they are affected instantaneously by the execution of the current 
+ * instruction. The addressM and pc outputs are clocked: although they 
+ * are affected by the execution of the current instruction, they commit 
+ * to their new values only in the next time step. If reset==1 then the 
+ * CPU jumps to address 0 (i.e. pc is set to 0 in next time step) rather 
+ * than to the address resulting from executing the current instruction. 
+ */
+
+/*
+
+C-Instruction
+
+1xxaccccccdddjjj
+
+dest = comp; jump
+
+a = bit 12
+
+Comp:
+
+bits 6-11 inclusive (cccccc)
+
+when a=1 A is replaced with M
+
+comp can be fed directly into the ALU
+
+ALU Inputs:
+zx: x=0
+nx: x=!x
+zy: y=0
+ny: y=!y
+f: if f then + else &
+no: !out
+
+a=0 a=1     zx  nx  zy  ny  f   no
+0           1   0   1   0   1   0
+1           1   1   1   1   1   1
+-1          1   1   1   0   1   0
+D           0   0   1   1   0   0
+A   M       1   1   0   0   0   0
+\!D         0   0   1   1   0   1
+\!A \!M     1   1   0   0   0   1
+-D          0   0   1   1   1   1
+-A  -M      1   1   0   0   1   1
+D+1         0   1   1   1   1   1
+A+1 M+1     1   1   0   1   1   1
+D-1         0   0   1   1   1   0
+A-1 M-1     1   1   0   0   1   0
+D+A D+M     0   0   0   0   1   0
+D-A D-M     0   1   0   0   1   1
+A-D M-D     0   0   0   1   1   1
+D&A D&M     0   0   0   0   0   0
+D|A D|M     0   1   0   1   0   1
+
+Dest:
+
+bits 3-5 inclusive (ddd)
+
+D1 = store in A
+D2 = store in D
+D3 = store in M
+
+dest    A   D   M   effect
+null    0   0   0   the value is not stored
+M       0   0   1   RAM[A]
+D       0   1   0   D reg
+DM      0   1   1   D and RAM[A]
+A       1   0   0   A reg
+AM      1   0   1   A and RAM[A]
+AD      1   1   0   A reg and D reg
+ADM     1   1   1   A reg, D reg, and RAM[A]
+
+Jump:
+
+bits 0-2 inclusive (jjj)
+
+J1: less than 0 
+J2: equal to 0
+J3: greater than 0
+
+jump    <   =   >   effect
+null    0   0   0   no jump
+JGT     0   0   1   if comp > 0 jump
+JEQ     0   1   0   if comp = 0 jump
+JGE     0   1   1   if comp >= 0 jump
+JLT     1   0   0   if comp < 0 jump
+JLE     1   1   0   if comp <= 0 jump
+JMP     1   1   1   unconditional jump
+
+I didn't realise that the address pins were right to left until i had written the whole thing :(
+
+*/
+
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+    // Put your code here:
+
+    // loads either the instruction or the ALU result into A based on the opcode
+    Not(in=instruction[15], out=isAInstruction);
+    Or(a=isAInstruction, b=instruction[5], out=AregLoad);
+
+    Mux16(a=instruction, b=ALUout, sel=instruction[15], out=AReg);
+    ARegister(in=AReg, load=AregLoad, out=ARegOut, out[0..14]=addressM);
+
+    And(a=instruction[4], b=instruction[15], out=loadD);
+
+    // loads the ALU result into D based on dest
+    DRegister(in=ALUout, load=loadD, out=DRegOut);
+
+    // sets the second input for the ALU as either A or M
+    Mux16(a=ARegOut, b=inM, sel=instruction[12], out=ARegOrM);
+
+    // computes comp
+    ALU(x=DRegOut, y=ARegOrM, zx=instruction[11], nx=instruction[10], zy=instruction[9], ny=instruction[8], f=instruction[7], no=instruction[6], out=ALUout, out=outM, zr=zr, ng=ng);
+
+    // branching logic
+    And(a=ng, b=instruction[2], out=jlt);
+    And(a=zr, b=instruction[1], out=jeq);
+    
+    // greater than
+    Not(in=ng, out=nng);
+    Not(in=zr, out=nzr);
+
+    And(a=nng, b=nzr, out=gt);
+    And(a=gt, b=instruction[0], out=jgt);
+
+    // determine wheather to branch or not
+    Or(a=jlt, b=jeq, out=jleq);
+    Or(a=jleq, b=jgt, out=cbranch);
+    // only branch if its a C-instruction
+    And(a=cbranch, b=instruction[15], out=branch);
+
+    Not(in=branch, out=nobranch);
+
+    PC(in=ARegOut, load=branch, inc=nobranch, reset=reset, out[0..14]=pc);
+
+    // only effect writeM if M is set and the current instruction is a C-Instruction
+    And(a=instruction[15], b=instruction[3], out=writeM);
+
+}
